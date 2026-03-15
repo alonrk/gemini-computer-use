@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Gemini Browser Use</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <p class="eyebrow">Active Tab Agent</p>
+        <h1>Gemini Browser Use</h1>
+        <p class="subtitle">Describe what to do on this page, then let Gemini drive the current tab through the local helper.</p>
+      </header>
+
+      <label class="field">
+        <span>Prompt</span>
+        <textarea id="prompt" rows="6" placeholder="Example: Find the pricing section and click Contact Sales."></textarea>
+      </label>
+
+      <div class="actions">
+        <button id="runButton" class="primary">Run</button>
+        <button id="stopButton" class="secondary">Stop</button>
+      </div>
+
+      <section class="panel">
+        <div class="panel-row">
+          <span>Status</span>
+          <strong id="status">Idle</strong>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <span>Run Log</span>
+        </div>
+        <ul id="logList" class="log-list"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+  </html>
