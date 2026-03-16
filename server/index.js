@@ -30,6 +30,7 @@ const TERMINAL_PHASES = new Set([SESSION_PHASES.COMPLETED, SESSION_PHASES.FAILED
 const MAX_HISTORY = 40;
 const MAX_TOTAL_STEPS = 36;
 const MAX_SUBGOAL_ATTEMPTS = 3;
+const NAVIGATION_CONFIRMATION_ATTEMPTS = 2;
 const GOAL_PHASES = Object.freeze({
   ORIENTING: "orienting",
   LOCATING_TARGET: "locating_target",
@@ -275,7 +276,13 @@ async function runSession(session) {
     });
 
     const result = await executePlaywrightAction(session.runner, actionWithId);
-    const postActionObservation = await collectObservation(session.runner, session.id, step);
+    const postActionObservation = await collectConfirmedObservation({
+      session,
+      step,
+      observationBefore: observation,
+      action: actionWithId,
+      result
+    });
     const changedAfterAction = meaningfulPageChange(observation, postActionObservation);
     const progressSignals = computeTaskProgressSignals({
       session,
@@ -392,6 +399,64 @@ async function finalizeSession(session, { status, reason, category, sendType }) 
   if (activeRunId === session.id) {
     activeRunId = null;
   }
+}
+
+async function collectConfirmedObservation({ session, step, observationBefore, action, result }) {
+  let observationAfter = await collectObservation(session.runner, session.id, step);
+
+  if (!shouldConfirmNavigation(action, result)) {
+    return observationAfter;
+  }
+
+  let attempt = 0;
+  while (attempt < NAVIGATION_CONFIRMATION_ATTEMPTS) {
+    if (isConfirmedNewPage(observationBefore, observationAfter)) {
+      return observationAfter;
+    }
+
+    attempt += 1;
+    session.status = SESSION_PHASES.WAITING_FOR_NAVIGATION;
+    await logSessionEvent(session, "navigation_confirmation_wait", {
+      attempt,
+      reason: "Post-navigation observation not yet coherent; waiting for a fresher page state.",
+      beforeUrl: observationBefore?.normalizedUrl || observationBefore?.url || "",
+      currentUrl: observationAfter?.normalizedUrl || observationAfter?.url || "",
+      beforeFingerprint: observationBefore?.pageFingerprint || "",
+      currentFingerprint: observationAfter?.pageFingerprint || ""
+    });
+
+    await wait(900);
+    observationAfter = await collectObservation(session.runner, session.id, step);
+  }
+
+  return observationAfter;
+}
+
+function shouldConfirmNavigation(action, result) {
+  return Boolean(
+    result?.triggeredNavigation ||
+      action?.actionType === ACTION_TYPES.NAVIGATE ||
+      action?.actionType === ACTION_TYPES.GO_BACK
+  );
+}
+
+function isConfirmedNewPage(previousObservation, nextObservation) {
+  const beforeUrl = normalizeUrl(previousObservation?.normalizedUrl || previousObservation?.url);
+  const afterUrl = normalizeUrl(nextObservation?.normalizedUrl || nextObservation?.url);
+  if (!beforeUrl || !afterUrl || beforeUrl === afterUrl) {
+    return false;
+  }
+
+  const titleChanged = `${previousObservation?.title || ""}` !== `${nextObservation?.title || ""}`;
+  const fingerprintChanged = meaningfulPageChange(previousObservation, nextObservation);
+  const hintCountShift = Math.abs((previousObservation?.interactiveHints?.length || 0) - (nextObservation?.interactiveHints?.length || 0)) >= 3;
+  const summaryChanged = `${previousObservation?.pageSummary || ""}` !== `${nextObservation?.pageSummary || ""}`;
+
+  return titleChanged || fingerprintChanged || hintCountShift || summaryChanged;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function handleEventStream(req, res, runId) {
