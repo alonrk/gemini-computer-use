@@ -1,12 +1,23 @@
+import fs from "node:fs/promises";
 import http from "node:http";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { URL } from "node:url";
+import {
+  ACTION_TYPES,
+  HELPER_ORIGIN,
+  SESSION_EVENT_TYPES,
+  SESSION_PHASES,
+  normalizeUrl
+} from "../shared/protocol.js";
 import { chooseNextAction } from "./gemini.js";
-import { HELPER_ORIGIN, SESSION_EVENT_TYPES } from "../shared/protocol.js";
+import { inferPlannerPhase } from "./agent.js";
 
 const sessions = new Map();
 const port = Number(process.env.PORT || 3210);
 const host = process.env.HOST || "127.0.0.1";
+const logsDir = path.join(process.cwd(), "server", "logs");
+const TERMINAL_PHASES = new Set([SESSION_PHASES.COMPLETED, SESSION_PHASES.FAILED, SESSION_PHASES.STOPPED]);
 
 const server = http.createServer(async (req, res) => {
   setCorsHeaders(res);
@@ -31,17 +42,35 @@ const server = http.createServer(async (req, res) => {
     }
 
     const sessionId = randomUUID();
+    const allowedOrigin = new URL(payload.url).origin;
     const session = {
       id: sessionId,
       prompt: payload.prompt,
-      status: "running",
+      status: SESSION_PHASES.STARTING,
       createdAt: Date.now(),
       meta: payload,
       observations: [],
       history: [],
-      eventClients: new Set()
+      eventClients: new Set(),
+      allowedOrigin,
+      allowedHostname: new URL(payload.url).hostname,
+      lastObservation: null,
+      previousObservation: null,
+      lastModelResponse: null,
+      repeatedActionCount: 0,
+      repeatedNavigationCount: 0,
+      oscillationCount: 0,
+      plannerPhase: "starting",
+      urlTrail: [],
+      logFile: path.join(logsDir, `${sessionId}.jsonl`)
     };
     sessions.set(sessionId, session);
+    await ensureLogsDir();
+    await logSessionEvent(session, "session_start", {
+      prompt: payload.prompt,
+      url: payload.url,
+      title: payload.title
+    });
 
     sendEvent(session, {
       type: SESSION_EVENT_TYPES.STATUS,
@@ -67,40 +96,96 @@ const server = http.createServer(async (req, res) => {
     if (!payload) {
       return;
     }
+    if (TERMINAL_PHASES.has(session.status)) {
+      await logSessionEvent(session, "observation_ignored_terminal", {
+        observationId: payload.observationId,
+        status: session.status
+      });
+      return writeJson(res, 200, { ok: true });
+    }
 
+    if (payload.observationId && payload.observationId === session.lastObservationId) {
+      await logSessionEvent(session, "stale_observation_ignored", {
+        observationId: payload.observationId,
+        normalizedUrl: payload.normalizedUrl
+      });
+      return writeJson(res, 200, { ok: true });
+    }
+
+    session.previousObservation = session.lastObservation;
+    session.lastObservation = payload;
+    session.lastObservationId = payload.observationId || null;
+    session.plannerPhase = inferPlannerPhase(session, payload);
     session.observations.push(payload);
+    if (session.observations.length > 40) {
+      session.observations.shift();
+    }
+    session.status = SESSION_PHASES.READY;
+
+    await logSessionEvent(session, "observation", {
+      observationId: payload.observationId,
+      normalizedUrl: payload.normalizedUrl,
+      pageFingerprint: payload.pageFingerprint,
+      plannerPhase: session.plannerPhase
+    });
+
     sendEvent(session, {
       type: SESSION_EVENT_TYPES.THOUGHT,
-      message: "Gemini is choosing the next browser action."
+      message: "Gemini is reviewing the current tab."
     });
 
     const action = await chooseNextAction(session, payload);
+    if (session.lastGeminiDebug) {
+      await logSessionEvent(session, "gemini_debug", session.lastGeminiDebug);
+    }
+    await logSessionEvent(session, "planner_action", action);
 
-    if (action.type === "fail") {
-      session.status = "failed";
+    if (action.actionType === ACTION_TYPES.FAIL) {
+      session.status = SESSION_PHASES.FAILED;
+      const summary = {
+        status: session.status,
+        reason: action.rationale,
+        plannerPhase: session.plannerPhase,
+        counters: currentCounters(session)
+      };
+      await logSessionEvent(session, "session_end", summary);
+      await logSessionEvent(session, "diagnostic_summary", summary);
       sendEvent(session, {
         type: SESSION_EVENT_TYPES.ERROR,
         message: action.rationale
       });
-      sendEvent(session, {
-        type: SESSION_EVENT_TYPES.DONE,
-        message: "Run finished with an error."
-      });
-    } else if (action.type === "finish") {
-      session.status = "completed";
+      return writeJson(res, 200, { ok: true });
+    }
+
+    if (action.actionType === ACTION_TYPES.FINISH) {
+      session.status = SESSION_PHASES.COMPLETED;
+      const summary = {
+        status: session.status,
+        reason: action.rationale,
+        plannerPhase: session.plannerPhase,
+        counters: currentCounters(session)
+      };
+      await logSessionEvent(session, "session_end", summary);
+      await logSessionEvent(session, "diagnostic_summary", summary);
       sendEvent(session, {
         type: SESSION_EVENT_TYPES.DONE,
         message: action.rationale || "Run complete."
       });
-    } else {
-      sendEvent(session, {
-        type: SESSION_EVENT_TYPES.ACTION_REQUEST,
-        action: {
-          ...action,
-          id: action.id || randomUUID()
-        }
-      });
+      return writeJson(res, 200, { ok: true });
     }
+
+    const actionWithId = {
+      ...action,
+      id: randomUUID()
+    };
+    await logSessionEvent(session, "planner_action_dispatched", actionWithId);
+    session.status = actionWithId.actionType === ACTION_TYPES.NAVIGATE ? SESSION_PHASES.WAITING_FOR_NAVIGATION : SESSION_PHASES.EXECUTING_ACTION;
+    session.pendingAction = actionWithId;
+
+    sendEvent(session, {
+      type: SESSION_EVENT_TYPES.ACTION_REQUEST,
+      action: actionWithId
+    });
 
     writeJson(res, 200, { ok: true });
     return;
@@ -118,8 +203,31 @@ const server = http.createServer(async (req, res) => {
     if (!payload) {
       return;
     }
+    if (TERMINAL_PHASES.has(session.status)) {
+      await logSessionEvent(session, "action_result_ignored_terminal", {
+        actionId: payload.actionId,
+        status: session.status
+      });
+      return writeJson(res, 200, { ok: true });
+    }
+
+    if (session.pendingAction?.id && payload.actionId && session.pendingAction.id !== payload.actionId) {
+      await logSessionEvent(session, "action_result_mismatch", {
+        expectedActionId: session.pendingAction.id,
+        receivedActionId: payload.actionId
+      });
+    }
 
     session.history.push(payload);
+    if (session.history.length > 40) {
+      session.history.shift();
+    }
+
+    session.lastNormalizedUrl = normalizeUrl(payload.normalizedNewUrl || payload.newUrl || session.lastObservation?.normalizedUrl || session.lastObservation?.url);
+    session.status = payload.triggeredNavigation ? SESSION_PHASES.WAITING_FOR_NAVIGATION : SESSION_PHASES.WAITING_FOR_DOM_SETTLE;
+
+    await logSessionEvent(session, "action_result", payload);
+    session.pendingAction = null;
     sendEvent(session, {
       type: SESSION_EVENT_TYPES.ACTION_LOG,
       message: `${payload.actionType}: ${payload.status}`
@@ -137,7 +245,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    session.status = "stopped";
+    session.status = SESSION_PHASES.STOPPED;
+    const summary = {
+      status: session.status,
+      reason: "Run stopped by the user."
+    };
+    await logSessionEvent(session, "session_end", summary);
+    await logSessionEvent(session, "diagnostic_summary", summary);
     sendEvent(session, {
       type: SESSION_EVENT_TYPES.DONE,
       message: "Run stopped."
@@ -150,7 +264,8 @@ const server = http.createServer(async (req, res) => {
   writeJson(res, 404, { error: "Not found." });
 });
 
-server.listen(port, host, () => {
+server.listen(port, host, async () => {
+  await ensureLogsDir();
   console.log(`Local helper listening on ${HELPER_ORIGIN}`);
 });
 
@@ -206,4 +321,28 @@ async function readJsonBody(req, res) {
 function writeJson(res, statusCode, payload) {
   res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload));
+}
+
+async function ensureLogsDir() {
+  await fs.mkdir(logsDir, { recursive: true });
+}
+
+async function logSessionEvent(session, type, payload) {
+  const entry = JSON.stringify({
+    timestamp: new Date().toISOString(),
+    sessionId: session.id,
+    type,
+    phase: session.status,
+    plannerPhase: session.plannerPhase,
+    payload
+  });
+  await fs.appendFile(session.logFile, `${entry}\n`, "utf8");
+}
+
+function currentCounters(session) {
+  return {
+    repeatedActionCount: session.repeatedActionCount || 0,
+    repeatedNavigationCount: session.repeatedNavigationCount || 0,
+    oscillationCount: session.oscillationCount || 0
+  };
 }
