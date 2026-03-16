@@ -1,0 +1,102 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  background: linear-gradient(160deg, #f5f7ff 0%, #eef8f2 100%);
+  color: #1a1f2c;
+}
+
+.app {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 24px 16px 36px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 1.7rem;
+}
+
+.subtitle {
+  margin: 0 0 18px;
+  color: #4a5468;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #dde3ef;
+  border-radius: 14px;
+  padding: 14px;
+  margin: 0 0 14px;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid #cfd7e4;
+  border-radius: 10px;
+  padding: 10px;
+  font: inherit;
+  margin: 0 0 12px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+#run-btn {
+  background: #1777f2;
+  color: #fff;
+}
+
+#stop-btn {
+  background: #f1f3f8;
+  color: #26324a;
+}
+
+button[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.log {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid #e5eaf3;
+  border-radius: 10px;
+  padding: 8px;
+  background: #fafcff;
+}
+
+.log-entry {
+  border-bottom: 1px solid #e6ecf7;
+  padding: 8px 0;
+  font-size: 0.93rem;
+}
+
+.log-entry:last-child {
+  border-bottom: 0;
+}
+
+.log-time {
+  color: #607086;
+  margin-right: 8px;
+}

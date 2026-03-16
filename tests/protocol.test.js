@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  ACTION_RESULT_STATUS,
   buildPageFingerprint,
   isRestrictedUrl,
   isSensitiveField,
@@ -17,6 +18,11 @@ import {
 test("restricted URLs are detected", () => {
   assert.equal(isRestrictedUrl("chrome://settings"), true);
   assert.equal(isRestrictedUrl("https://example.com"), false);
+});
+
+test("action result statuses include low_progress and no_effect", () => {
+  assert.equal(ACTION_RESULT_STATUS.NO_EFFECT, "no_effect");
+  assert.equal(ACTION_RESULT_STATUS.LOW_PROGRESS, "low_progress");
 });
 
 test("sensitive fields are detected", () => {
@@ -170,6 +176,31 @@ test("detectLoop fails when repeatedly targeting the same coordinates", () => {
   });
 
   assert.match(loopError, /same target/i);
+});
+
+test("detectLoop fails repeated validation errors even with recovery waits", () => {
+  const session = {
+    history: [
+      { actionType: "type_text_at", x: 587, y: 43, text: "Destroyer Cult Dice", status: "validation_error", normalizedNewUrl: "https://example.com" },
+      { actionType: "wait", status: "success", normalizedNewUrl: "https://example.com" },
+      { actionType: "type_text_at", x: 591, y: 43, text: "Destroyer Cult Dice", status: "validation_error", normalizedNewUrl: "https://example.com" },
+      { actionType: "wait", status: "success", normalizedNewUrl: "https://example.com" },
+      { actionType: "type_text_at", x: 590, y: 43, text: "Destroyer Cult Dice", status: "validation_error", normalizedNewUrl: "https://example.com" },
+      { actionType: "type_text_at", x: 587, y: 43, text: "Destroyer Cult Dice", status: "validation_error", normalizedNewUrl: "https://example.com" }
+    ],
+    previousObservation: { url: "https://example.com", pageFingerprint: "same" },
+    lastNormalizedUrl: "https://example.com",
+    repeatedActionCount: 0,
+    repeatedNavigationCount: 0
+  };
+
+  const loopError = detectLoop(session, {
+    url: "https://example.com",
+    normalizedUrl: "https://example.com",
+    pageFingerprint: "same"
+  });
+
+  assert.match(loopError, /repeated invalid interactions/i);
 });
 
 test("inferPlannerPhase returns acting after direct action steps", () => {

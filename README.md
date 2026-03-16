@@ -1,57 +1,67 @@
-# Gemini Computer Use Chrome Extension
+# Gemini Computer Use (Playwright Runtime)
 
-Local-first Chrome extension plus helper service for running Gemini Computer Use on the real current tab.
+Local-first Gemini Computer Use runner with:
+- a local web app for prompt + start URL input
+- a headed Playwright browser so actions are visible
+- a Node helper loop that sends observations to Gemini and executes returned actions
 
-## What this includes
+## Runtime
 
-- A Chrome Extension (Manifest V3) with:
-  - side panel prompt, run/stop controls, live log
-  - background service worker that manages one active session on the current tab
-  - content script that executes visible actions and summarizes the page
-- A local Node helper service with:
-  - `POST /session/start`
-  - `POST /session/:id/observe`
-  - `POST /session/:id/action-result`
-  - `POST /session/:id/stop`
-  - `GET /session/:id/events` SSE stream
-  - JSONL session logs in [server/logs](/Users/alonrk/Desktop/code/gemini-computer-use/server/logs)
+- Start UI: `GET /`
+- Start run: `POST /runs/start` with `{ prompt, startUrl }`
+- Stop run: `POST /runs/:id/stop`
+- Event stream: `GET /runs/:id/events` (SSE)
+
+SSE event types:
+- `status`
+- `thought`
+- `action`
+- `action_result`
+- `done`
+- `error`
 
 ## Run locally
 
-1. Export a Gemini API key:
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Set Gemini API key:
 
 ```bash
 export GEMINI_API_KEY=your_key_here
 ```
 
-2. Start the local helper:
+You can also paste the key directly into the web app "Gemini API Key" field for a specific run.
+
+3. Start server:
 
 ```bash
 npm start
 ```
 
-3. Load the extension in Chrome:
-   - open `chrome://extensions`
-   - enable Developer mode
-   - choose Load unpacked
-   - select [extension](/Users/alonrk/Desktop/code/gemini-computer-use/extension)
+4. Open:
 
-4. Open a normal web page, open the extension side panel, enter a prompt, and click `Run`.
+```text
+http://127.0.0.1:3210
+```
 
-## Runtime behavior
+Then enter `startUrl` + `prompt` and click `Run`.
 
-- Gemini Computer Use receives the current tab screenshot, URL, page summary, and recent action history.
-- The extension executes Gemini's actions directly on the current tab.
-- The agent is generic: it attempts prompts across docs, forms, dashboards, search pages, and e-commerce flows.
-- Same-site navigation is allowed, but cross-site navigation is blocked.
-- Loop guards stop repeated action/page oscillation and force strategy changes before failing.
-- Unsafe actions are blocked (downloads, password/credit-card fields, irreversible payment confirmation).
-- Runs write debug logs to [server/logs](/Users/alonrk/Desktop/code/gemini-computer-use/server/logs).
+## Behavior
+
+- Browser is always visible (`headless: false`).
+- Scope is start-domain only: cross-domain navigation is blocked.
+- Allowed action execution: `click_at`, `type_text_at`, `scroll_document`, `wait_5_seconds`, `go_back`, `navigate`.
+- Loop guards stop repeated no-progress behavior.
+- JSONL logs are written to `server/logs/`.
 
 ## Notes
 
-- If `GEMINI_API_KEY` is not set, runs fail fast with a clear helper error.
-- Gemini Computer Use is still preview tooling, so some model function names or safety behavior may need tuning against live API responses.
+- The old extension code is kept in the repo but is no longer used by the active runtime path.
+- Gemini Computer Use is preview tooling; function availability and safety responses may vary.
 
 ## Tests
 

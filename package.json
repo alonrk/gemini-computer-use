@@ -1,8 +1,11 @@
 {
-  "name": "gemini-computer-use-extension",
+  "name": "gemini-computer-use",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "playwright": "^1.53.0"
+  },
   "scripts": {
     "start": "node server/index.js",
     "test": "node --test"

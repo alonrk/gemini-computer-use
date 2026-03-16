@@ -1,15 +1,17 @@
 import {
+  ACTION_RESULT_STATUS,
   ACTION_TYPES,
   meaningfulPageChange,
   normalizeUrl,
   sameAction
 } from "../shared/protocol.js";
 
-const MAX_STEPS = 24;
+const MAX_STEPS = 36;
 const MAX_REPEAT_COUNT = 3;
 const MAX_STAGNANT_STEPS = 8;
 const MAX_OSCILLATION = 3;
 const MAX_SAME_TARGET_ATTEMPTS = 3;
+const MAX_REPEATED_VALIDATION_ERRORS = 4;
 
 export function extractTextParts(content) {
   return content?.parts?.map((part) => part.text || "").filter(Boolean).join("\n").trim() || "";
@@ -38,8 +40,9 @@ export function detectLoop(session, observation) {
   const normalizedUrl = normalizeUrl(observation?.normalizedUrl || observation?.url);
   session.urlTrail = [...(session.urlTrail || []), normalizedUrl].slice(-8);
 
-  const lastAction = history.at(-1);
-  const previousAction = history.at(-2);
+  const latestPrimaryActions = getRecentPrimaryActions(history, 2);
+  const lastAction = latestPrimaryActions.at(0);
+  const previousAction = latestPrimaryActions.at(1);
   if (lastAction && previousAction && sameAction(lastAction, previousAction) && !meaningfulPageChange(session.previousObservation, observation)) {
     session.repeatedActionCount = (session.repeatedActionCount || 0) + 1;
   } else {
@@ -64,6 +67,11 @@ export function detectLoop(session, observation) {
 
   if (sameTargetRepeats(history) >= MAX_SAME_TARGET_ATTEMPTS) {
     return "Loop detected: repeated clicks or types on the same target without progress.";
+  }
+
+  const repeatedValidationError = detectRepeatedValidationErrorPattern(history, normalizedUrl);
+  if (repeatedValidationError) {
+    return repeatedValidationError;
   }
 
   if (detectOscillation(session.urlTrail)) {
@@ -157,6 +165,7 @@ export function normalizeModelAction(functionCall, session, observation) {
         safetyDecision
       };
     case "navigate_current_tab":
+    case "navigate":
       return {
         actionType: ACTION_TYPES.NAVIGATE,
         rationale,
@@ -257,11 +266,17 @@ function isSameTargetAction(left, right) {
     return false;
   }
 
-  const leftX = Math.round(Number(left.x) || -1);
-  const leftY = Math.round(Number(left.y) || -1);
-  const rightX = Math.round(Number(right.x) || -1);
-  const rightY = Math.round(Number(right.y) || -1);
-  return leftX === rightX && leftY === rightY;
+  const leftX = Number(left.x);
+  const leftY = Number(left.y);
+  const rightX = Number(right.x);
+  const rightY = Number(right.y);
+  if (!Number.isFinite(leftX) || !Number.isFinite(leftY) || !Number.isFinite(rightX) || !Number.isFinite(rightY)) {
+    return false;
+  }
+
+  const dx = Math.abs(Math.round(leftX) - Math.round(rightX));
+  const dy = Math.abs(Math.round(leftY) - Math.round(rightY));
+  return dx <= 12 && dy <= 12;
 }
 
 function detectOscillation(urlTrail) {
@@ -291,4 +306,69 @@ export function inferPlannerPhase(session, observation) {
     return "acting";
   }
   return "verifying";
+}
+
+function getRecentPrimaryActions(history, maxCount) {
+  const primary = [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index];
+    if (!item) {
+      continue;
+    }
+    if (item.actionType === ACTION_TYPES.WAIT || item.actionType === ACTION_TYPES.SCROLL) {
+      continue;
+    }
+    primary.push(item);
+    if (primary.length >= maxCount) {
+      break;
+    }
+  }
+  return primary;
+}
+
+function detectRepeatedValidationErrorPattern(history, normalizedUrl) {
+  if (!Array.isArray(history) || history.length < MAX_REPEATED_VALIDATION_ERRORS) {
+    return null;
+  }
+
+  const recent = history.slice(-10).filter((entry) =>
+    entry &&
+    [ACTION_TYPES.TYPE_TEXT_AT, ACTION_TYPES.CLICK_AT].includes(entry.actionType) &&
+    entry.status === ACTION_RESULT_STATUS.VALIDATION_ERROR &&
+    normalizeUrl(entry.normalizedNewUrl || entry.newUrl) === normalizedUrl
+  );
+  if (recent.length < MAX_REPEATED_VALIDATION_ERRORS) {
+    return null;
+  }
+
+  const signatures = new Map();
+  for (const entry of recent) {
+    const signature = `${entry.actionType}|${normalizeCoordinateBucket(entry.x)}|${normalizeCoordinateBucket(entry.y)}|${normalizeTextSignature(entry.text)}`;
+    signatures.set(signature, (signatures.get(signature) || 0) + 1);
+  }
+
+  let highestCount = 0;
+  for (const value of signatures.values()) {
+    if (value > highestCount) {
+      highestCount = value;
+    }
+  }
+
+  if (highestCount >= 3) {
+    return "Loop detected: repeated invalid interactions on the same area without progress.";
+  }
+
+  return null;
+}
+
+function normalizeCoordinateBucket(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "na";
+  }
+  return Math.round(numeric / 12);
+}
+
+function normalizeTextSignature(value) {
+  return `${value || ""}`.trim().toLowerCase().slice(0, 60);
 }

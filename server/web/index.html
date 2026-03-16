@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gemini Computer Use Runner</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <h1>Gemini Computer Use Runner</h1>
+      <p class="subtitle">Enter a site URL and prompt, then watch a visible Playwright browser execute actions.</p>
+
+      <form id="run-form" class="card">
+        <label for="gemini-api-key">Gemini API Key</label>
+        <input id="gemini-api-key" name="geminiApiKey" type="password" placeholder="AIza..." autocomplete="off" />
+
+        <label for="start-url">Start URL</label>
+        <input id="start-url" name="startUrl" type="url" required placeholder="https://example.com" />
+
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" name="prompt" required rows="4" placeholder="What should Gemini do on this site?"></textarea>
+
+        <div class="actions">
+          <button id="run-btn" type="submit">Run</button>
+          <button id="stop-btn" type="button" disabled>Stop</button>
+        </div>
+      </form>
+
+      <section class="card">
+        <h2>Status</h2>
+        <p id="status">Idle</p>
+      </section>
+
+      <section class="card">
+        <h2>Run Log</h2>
+        <div id="log" class="log"></div>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+  </html>

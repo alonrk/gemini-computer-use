@@ -17,7 +17,9 @@ export const ACTION_RESULT_STATUS = Object.freeze({
   BLOCKED: "blocked",
   NAVIGATION: "navigation",
   CHANGED_DOM: "changed_dom",
-  VALIDATION_ERROR: "validation_error"
+  VALIDATION_ERROR: "validation_error",
+  NO_EFFECT: "no_effect",
+  LOW_PROGRESS: "low_progress"
 });
 
 export const SESSION_EVENT_TYPES = Object.freeze({
