@@ -323,6 +323,8 @@ async function runSession(session) {
       url: actionWithId.url,
       scrollAmount: actionWithId.scrollAmount,
       waitMs: actionWithId.waitMs,
+      skipPersistenceAccounting: Boolean(actionWithId.skipPersistenceAccounting),
+      recoveryKind: actionWithId.recoveryKind || null,
       strategyKey: actionWithId.strategyKey,
       modelFunctionName: actionWithId.modelFunctionName || null,
       safetyDecision: actionWithId.safetyDecision || null,
@@ -387,7 +389,6 @@ async function finalizeSession(session, { status, reason, category, sendType }) 
   };
 
   await logSessionEvent(session, "session_end", summary);
-  await logSessionEvent(session, "diagnostic_summary", summary);
 
   sendEvent(session, {
     type: sendType,
@@ -643,9 +644,13 @@ function updateGoalStateAfterAction(session, actionResult) {
     return;
   }
 
+  session.goalState.lastFinishGateDecision = { decision: "not_evaluated" };
+  if (actionResult.skipPersistenceAccounting) {
+    return;
+  }
+
   session.goalState.attemptBudgetRemaining = Math.max(0, session.goalState.attemptBudgetRemaining - 1);
   session.goalState.verificationSignals = actionResult.progressSignals || [];
-  session.goalState.lastFinishGateDecision = { decision: "not_evaluated" };
 
   if (actionResult.taskProgressChanged) {
     session.goalState.noProgressStreak = 0;
@@ -719,6 +724,14 @@ function computeTaskProgressSignals({ session, observationBefore, observationAft
   const signals = new Set();
   const beforeUrl = normalizeUrl(observationBefore?.normalizedUrl || observationBefore?.url);
   const afterUrl = normalizeUrl(observationAfter?.normalizedUrl || observationAfter?.url);
+  const beforeHintCount = observationBefore?.interactiveHints?.length || 0;
+  const afterHintCount = observationAfter?.interactiveHints?.length || 0;
+  const newHintCount = countNewVisibleHintTargets(observationBefore?.interactiveHints, observationAfter?.interactiveHints);
+  const beforeScrollY = Number(observationBefore?.screenshotMeta?.scrollY || 0);
+  const afterScrollY = Number(observationAfter?.screenshotMeta?.scrollY || 0);
+  const scrollDelta = Math.abs(afterScrollY - beforeScrollY);
+  const viewportHeight = Number(observationAfter?.viewport?.height || observationBefore?.viewport?.height || 0);
+  const meaningfulScrollDelta = Math.max(180, Math.round(viewportHeight * 0.3) || 180);
 
   if (beforeUrl !== afterUrl) {
     signals.add("url_changed");
@@ -739,10 +752,12 @@ function computeTaskProgressSignals({ session, observationBefore, observationAft
     signals.add("form_count_changed");
   }
 
-  const beforeHints = observationBefore?.interactiveHints?.length || 0;
-  const afterHints = observationAfter?.interactiveHints?.length || 0;
-  if (afterHints > beforeHints + 3) {
+  if (afterHintCount > beforeHintCount + 3 || newHintCount >= 3) {
     signals.add("new_interactive_controls_visible");
+  }
+
+  if (newHintCount >= 2) {
+    signals.add("interactive_targets_changed");
   }
 
   if (result?.triggeredNavigation) {
@@ -753,17 +768,45 @@ function computeTaskProgressSignals({ session, observationBefore, observationAft
     signals.add("input_applied");
   }
 
+  if (action?.actionType === ACTION_TYPES.SCROLL && scrollDelta >= meaningfulScrollDelta && newHintCount >= 2) {
+    signals.add("exploration_progress");
+  }
+
   if (detectVerificationText(observationAfter?.pageSummary || "")) {
     signals.add("confirmation_text_detected");
   }
 
   if (!changedAfterAction) {
-    signals.delete("new_interactive_controls_visible");
     signals.delete("confirmation_text_detected");
     signals.delete("input_applied");
   }
 
   return [...signals];
+}
+
+function countNewVisibleHintTargets(beforeHints, afterHints) {
+  const before = new Set((beforeHints || []).map(buildHintSignature).filter(Boolean));
+  let newCount = 0;
+  for (const hint of afterHints || []) {
+    const signature = buildHintSignature(hint);
+    if (!signature || before.has(signature)) {
+      continue;
+    }
+    newCount += 1;
+  }
+  return newCount;
+}
+
+function buildHintSignature(hint) {
+  if (!hint) {
+    return "";
+  }
+
+  const href = `${hint.href || ""}`.trim().toLowerCase();
+  const text = `${hint.text || ""}`.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 80);
+  const tag = `${hint.tag || ""}`.trim().toLowerCase();
+  const role = `${hint.role || ""}`.trim().toLowerCase();
+  return [tag, role, text, href].filter(Boolean).join("|");
 }
 
 function includesPromptKeywordInUrl(afterUrl, beforeUrl, promptTokens) {

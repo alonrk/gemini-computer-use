@@ -34,14 +34,14 @@ Core components:
 flowchart LR
     U["User"] --> W["Local Web App<br/>server/web"]
     W -->|POST /runs/start| S["Node Helper<br/>server/index.js"]
-    S -->|launch visible browser| P["Playwright Chromium<br/>headless: false"]
-    P -->|observe page| O["Observation<br/>URL, screenshot, hints, signals"]
-    O --> G["Gemini Computer Use<br/>server/gemini.js"]
+    S -->|launch visible browser| P["Playwright Chromium<br/>headed"]
+    P -->|capture state| O["Observation<br/>URL, screenshot, summary, hints"]
+    O --> S
+    S -->|request next action| G["Gemini Computer Use<br/>server/gemini.js"]
     G -->|function call| S
-    S -->|execute action| P
-    P -->|action result + fresh state| S
-    S -->|SSE events| W
-    S -->|JSONL logs| L["server/logs/*.jsonl"]
+    S -->|execute validated action| P
+    P -->|fresh page state| O
+    S -->|SSE status + results| W
 ```
 
 ## Computer Use Loop
@@ -62,7 +62,7 @@ Current flow:
 4. The helper sends that state to Gemini Computer Use.
 5. Gemini returns one action at a time, such as `click_at`, `type_text_at`, `scroll_document`, `go_back`, or `navigate`.
 6. The helper validates policy, executes the action in Playwright, captures a fresh observation, and sends a matching function response back into the Computer Use loop.
-7. Progress, action results, and terminal state are streamed to the UI over SSE and written to JSONL logs.
+7. Progress, action results, and terminal state are streamed to the UI over SSE.
 
 ## On-Spec Behavior
 
@@ -122,7 +122,6 @@ Logs include:
 - Gemini request/response summaries
 - planner actions
 - action results
-- diagnostic summary
 
 ## Run Locally
 

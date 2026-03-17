@@ -203,6 +203,25 @@ test("detectLoop fails repeated validation errors even with recovery waits", () 
   assert.match(loopError, /repeated invalid interactions/i);
 });
 
+test("detectLoop ignores transport recovery waits for stagnation accounting", () => {
+  const session = {
+    history: [{ actionType: "wait", skipPersistenceAccounting: true }],
+    previousObservation: { url: "https://example.com", pageFingerprint: "same" },
+    lastNormalizedUrl: "https://example.com",
+    repeatedActionCount: 0,
+    repeatedNavigationCount: 7
+  };
+
+  const loopError = detectLoop(session, {
+    url: "https://example.com",
+    normalizedUrl: "https://example.com",
+    pageFingerprint: "same"
+  });
+
+  assert.equal(loopError, null);
+  assert.equal(session.repeatedNavigationCount, 0);
+});
+
 test("inferPlannerPhase returns acting after direct action steps", () => {
   const phase = inferPlannerPhase(
     {

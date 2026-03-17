@@ -39,6 +39,7 @@ export function detectLoop(session, observation) {
   const history = session.history || [];
   const normalizedUrl = normalizeUrl(observation?.normalizedUrl || observation?.url);
   session.urlTrail = [...(session.urlTrail || []), normalizedUrl].slice(-8);
+  const lastHistoryEntry = history.at(-1);
 
   const latestPrimaryActions = getRecentPrimaryActions(history, 2);
   const lastAction = latestPrimaryActions.at(0);
@@ -53,9 +54,15 @@ export function detectLoop(session, observation) {
     return "Loop detected: Gemini kept selecting the same action without changing the page.";
   }
 
-  const lastExecutedActionType = history.at(-1)?.actionType || "";
+  const lastExecutedActionType = lastHistoryEntry?.actionType || "";
+  const skipPersistenceAccounting = Boolean(lastHistoryEntry?.skipPersistenceAccounting);
   const actionCanStagnate = new Set([ACTION_TYPES.WAIT, ACTION_TYPES.SCROLL, ACTION_TYPES.GO_BACK]).has(lastExecutedActionType);
-  if (actionCanStagnate && session.lastNormalizedUrl === normalizedUrl && !meaningfulPageChange(session.previousObservation, observation)) {
+  if (
+    actionCanStagnate &&
+    !skipPersistenceAccounting &&
+    session.lastNormalizedUrl === normalizedUrl &&
+    !meaningfulPageChange(session.previousObservation, observation)
+  ) {
     session.repeatedNavigationCount = (session.repeatedNavigationCount || 0) + 1;
   } else {
     session.repeatedNavigationCount = 0;

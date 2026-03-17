@@ -11,6 +11,7 @@ import {
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
 const SHOW_ACTION_MARKER = process.env.COMPUTER_USE_DEBUG_OVERLAY !== "0";
 const ACTION_OVERLAY_MS = 1400;
+const OBSERVATION_RETRY_ATTEMPTS = 3;
 
 export async function createPlaywrightRunner({ startUrl, allowedOrigin }) {
   const browser = await chromium.launch({
@@ -39,134 +40,147 @@ export async function closePlaywrightRunner(runner) {
 
 export async function collectObservation(runner, runId, step) {
   const page = runner.page;
-  const screenshotBuffer = await page.screenshot({ type: "png", fullPage: false });
-  const pageData = await page.evaluate(() => {
-    const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
-    const normalizeCoord = (value, total) => {
-      if (!Number.isFinite(value) || !Number.isFinite(total) || total <= 0) {
-        return 0;
-      }
-      return Math.max(0, Math.min(999, Math.round((value / total) * 1000)));
-    };
-    const isVisibleRect = (rect) =>
-      rect.width > 0 &&
-      rect.height > 0 &&
-      rect.bottom >= 0 &&
-      rect.right >= 0 &&
-      rect.top <= window.innerHeight &&
-      rect.left <= window.innerWidth;
-    const isPointInViewport = (x, y) =>
-      Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= 999 && y <= 999;
+  for (let attempt = 1; attempt <= OBSERVATION_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      await settleAfterNavigation(page);
+      const screenshotBuffer = await page.screenshot({ type: "png", fullPage: false });
+      const pageData = await page.evaluate(() => {
+        const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
+        const normalizeCoord = (value, total) => {
+          if (!Number.isFinite(value) || !Number.isFinite(total) || total <= 0) {
+            return 0;
+          }
+          return Math.max(0, Math.min(999, Math.round((value / total) * 1000)));
+        };
+        const isVisibleRect = (rect) =>
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.bottom >= 0 &&
+          rect.right >= 0 &&
+          rect.top <= window.innerHeight &&
+          rect.left <= window.innerWidth;
+        const isPointInViewport = (x, y) =>
+          Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= 999 && y <= 999;
 
-    const headings = [...document.querySelectorAll("h1, h2, h3")]
-      .map((element) => normalize(element.textContent))
-      .filter(Boolean)
-      .slice(0, 8);
+        const headings = [...document.querySelectorAll("h1, h2, h3")]
+          .map((element) => normalize(element.textContent))
+          .filter(Boolean)
+          .slice(0, 8);
 
-    const visibleTexts = [...document.querySelectorAll("a, button, h1, h2, h3, [role='button'], p, span")]
-      .map((element) => normalize(element.textContent))
-      .filter(Boolean)
-      .slice(0, 20);
+        const visibleTexts = [...document.querySelectorAll("a, button, h1, h2, h3, [role='button'], p, span")]
+          .map((element) => normalize(element.textContent))
+          .filter(Boolean)
+          .slice(0, 20);
 
-    const bodyText = normalize(document.body?.innerText || "").slice(0, 1400);
-    const pageSummary = [`Headings: ${headings.join(" | ")}`, `Visible text: ${bodyText}`].join("\n");
+        const bodyText = normalize(document.body?.innerText || "").slice(0, 1400);
+        const pageSummary = [`Headings: ${headings.join(" | ")}`, `Visible text: ${bodyText}`].join("\n");
 
-    const interactiveHints = [...document.querySelectorAll("a, button, input, textarea, select, [role='button'], [contenteditable='true']")]
-      .map((element) => {
-        const rect = element.getBoundingClientRect();
-        if (!isVisibleRect(rect)) {
-          return null;
-        }
-        const text = normalize(
-          element.innerText ||
-            element.value ||
-            element.getAttribute("aria-label") ||
-            element.getAttribute("placeholder")
-        );
-        if (!text) {
-          return null;
-        }
+        const interactiveHints = [...document.querySelectorAll("a, button, input, textarea, select, [role='button'], [contenteditable='true']")]
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            if (!isVisibleRect(rect)) {
+              return null;
+            }
+            const text = normalize(
+              element.innerText ||
+                element.value ||
+                element.getAttribute("aria-label") ||
+                element.getAttribute("placeholder")
+            );
+            if (!text) {
+              return null;
+            }
+            return {
+              tag: element.tagName.toLowerCase(),
+              role: element.getAttribute("role") || "",
+              text,
+              href: element.getAttribute("href") || "",
+              center: {
+                x: normalizeCoord(rect.left + rect.width / 2, window.innerWidth),
+                y: normalizeCoord(rect.top + rect.height / 2, window.innerHeight)
+              },
+              bounds: {
+                x: normalizeCoord(rect.left, window.innerWidth),
+                y: normalizeCoord(rect.top, window.innerHeight),
+                width: normalizeCoord(rect.width, window.innerWidth),
+                height: normalizeCoord(rect.height, window.innerHeight)
+              }
+            };
+          })
+          .filter((entry) => entry && isPointInViewport(entry.center.x, entry.center.y))
+          .slice(0, 50);
+
+        const modalVisible = Boolean(document.querySelector("[role='dialog'], [aria-modal='true'], dialog[open]"));
+        const formCount = document.querySelectorAll("form").length;
+        const errorMessages = [...document.querySelectorAll("[role='alert'], .error, [aria-invalid='true']")]
+          .map((element) => normalize(element.textContent))
+          .filter(Boolean)
+          .slice(0, 6);
+
         return {
-          tag: element.tagName.toLowerCase(),
-          role: element.getAttribute("role") || "",
-          text,
-          href: element.getAttribute("href") || "",
-          center: {
-            x: normalizeCoord(rect.left + rect.width / 2, window.innerWidth),
-            y: normalizeCoord(rect.top + rect.height / 2, window.innerHeight)
+          url: location.href,
+          title: document.title,
+          viewport: {
+            width: window.innerWidth,
+            height: window.innerHeight,
+            devicePixelRatio: window.devicePixelRatio || 1
           },
-          bounds: {
-            x: normalizeCoord(rect.left, window.innerWidth),
-            y: normalizeCoord(rect.top, window.innerHeight),
-            width: normalizeCoord(rect.width, window.innerWidth),
-            height: normalizeCoord(rect.height, window.innerHeight)
+          screenshotMeta: {
+            expectedPixelWidth: Math.round(window.innerWidth * (window.devicePixelRatio || 1)),
+            expectedPixelHeight: Math.round(window.innerHeight * (window.devicePixelRatio || 1)),
+            scrollX: Math.round(window.scrollX || 0),
+            scrollY: Math.round(window.scrollY || 0),
+            visualViewport: window.visualViewport
+              ? {
+                  width: Math.round(window.visualViewport.width),
+                  height: Math.round(window.visualViewport.height),
+                  offsetLeft: Math.round(window.visualViewport.offsetLeft),
+                  offsetTop: Math.round(window.visualViewport.offsetTop),
+                  scale: window.visualViewport.scale
+                }
+              : null
+          },
+          headings,
+          visibleTexts,
+          pageSummary,
+          interactiveHints,
+          uiSignals: {
+            modalVisible,
+            formCount,
+            errorMessages
           }
         };
-      })
-      .filter((entry) => entry && isPointInViewport(entry.center.x, entry.center.y))
-      .slice(0, 50);
+      });
 
-    const modalVisible = Boolean(document.querySelector("[role='dialog'], [aria-modal='true'], dialog[open]"));
-    const formCount = document.querySelectorAll("form").length;
-    const errorMessages = [...document.querySelectorAll("[role='alert'], .error, [aria-invalid='true']")]
-      .map((element) => normalize(element.textContent))
-      .filter(Boolean)
-      .slice(0, 6);
-
-    return {
-      url: location.href,
-      title: document.title,
-      viewport: {
-        width: window.innerWidth,
-        height: window.innerHeight,
-        devicePixelRatio: window.devicePixelRatio || 1
-      },
-      screenshotMeta: {
-        expectedPixelWidth: Math.round(window.innerWidth * (window.devicePixelRatio || 1)),
-        expectedPixelHeight: Math.round(window.innerHeight * (window.devicePixelRatio || 1)),
-        scrollX: Math.round(window.scrollX || 0),
-        scrollY: Math.round(window.scrollY || 0),
-        visualViewport: window.visualViewport
-          ? {
-              width: Math.round(window.visualViewport.width),
-              height: Math.round(window.visualViewport.height),
-              offsetLeft: Math.round(window.visualViewport.offsetLeft),
-              offsetTop: Math.round(window.visualViewport.offsetTop),
-              scale: window.visualViewport.scale
-            }
-          : null
-      },
-      headings,
-      visibleTexts,
-      pageSummary,
-      interactiveHints,
-      uiSignals: {
-        modalVisible,
-        formCount,
-        errorMessages
+      return {
+        runId,
+        observationId: randomUUID(),
+        step,
+        url: pageData.url,
+        normalizedUrl: normalizeUrl(pageData.url),
+        title: pageData.title,
+        viewport: pageData.viewport,
+        screenshotMeta: pageData.screenshotMeta,
+        pageFingerprint: buildPageFingerprint({
+          title: pageData.title,
+          headings: pageData.headings,
+          visibleTexts: pageData.visibleTexts
+        }),
+        pageSummary: pageData.pageSummary,
+        interactiveHints: pageData.interactiveHints,
+        uiSignals: pageData.uiSignals,
+        screenshot: `data:image/png;base64,${screenshotBuffer.toString("base64")}`
+      };
+    } catch (error) {
+      if (!isNavigationContextError(error) || attempt >= OBSERVATION_RETRY_ATTEMPTS) {
+        throw error;
       }
-    };
-  });
+      await settleAfterNavigation(page);
+      await wait(250 * attempt);
+    }
+  }
 
-  return {
-    runId,
-    observationId: randomUUID(),
-    step,
-    url: pageData.url,
-    normalizedUrl: normalizeUrl(pageData.url),
-    title: pageData.title,
-    viewport: pageData.viewport,
-    screenshotMeta: pageData.screenshotMeta,
-    pageFingerprint: buildPageFingerprint({
-      title: pageData.title,
-      headings: pageData.headings,
-      visibleTexts: pageData.visibleTexts
-    }),
-    pageSummary: pageData.pageSummary,
-    interactiveHints: pageData.interactiveHints,
-    uiSignals: pageData.uiSignals,
-    screenshot: `data:image/png;base64,${screenshotBuffer.toString("base64")}`
-  };
+  throw new Error("Observation collection failed after navigation retries.");
 }
 
 export async function executePlaywrightAction(runner, action) {
@@ -278,7 +292,7 @@ async function clickAt(runner, action) {
 
   const beforeUrl = page.url();
   await page.mouse.click(point.x, point.y, { delay: 40 });
-  await waitForPossibleNavigation(page);
+  await waitForPossibleNavigation(page, beforeUrl);
   const afterUrl = page.url();
   if (!isSameOrigin(afterUrl, runner.allowedOrigin)) {
     await safeGoBack(page);
@@ -391,7 +405,7 @@ async function typeAt(runner, action) {
     await page.keyboard.press("Enter");
   }
 
-  await waitForPossibleNavigation(page);
+  await waitForPossibleNavigation(page, beforeUrl);
   const afterUrl = page.url();
   if (!isSameOrigin(afterUrl, runner.allowedOrigin)) {
     await safeGoBack(page);
@@ -521,11 +535,45 @@ async function resolvePoint(page, x, y) {
   };
 }
 
-async function waitForPossibleNavigation(page) {
+async function waitForPossibleNavigation(page, beforeUrl = page.url()) {
+  const navigationStarted = await Promise.race([
+    page
+      .waitForEvent("framenavigated", {
+        timeout: 1500,
+        predicate: (frame) => frame === page.mainFrame()
+      })
+      .then(() => true)
+      .catch(() => false),
+    wait(300).then(() => false)
+  ]);
+
+  const urlChanged = normalizeUrl(page.url()) !== normalizeUrl(beforeUrl);
+  if (navigationStarted || urlChanged) {
+    await settleAfterNavigation(page);
+    return;
+  }
+
   await Promise.race([
-    page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {}),
+    page.waitForLoadState("domcontentloaded", { timeout: 1200 }).catch(() => {}),
     wait(500)
   ]);
+}
+
+async function settleAfterNavigation(page) {
+  await Promise.race([
+    page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {}),
+    wait(700)
+  ]);
+  await wait(200);
+}
+
+function isNavigationContextError(error) {
+  const message = `${error?.message || error || ""}`.toLowerCase();
+  return (
+    message.includes("execution context was destroyed") ||
+    message.includes("most likely because of a navigation") ||
+    message.includes("cannot find context with specified id")
+  );
 }
 
 async function safeGoBack(page) {

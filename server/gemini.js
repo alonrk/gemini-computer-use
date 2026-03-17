@@ -15,9 +15,11 @@ import {
   normalizeModelAction
 } from "./agent.js";
 
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-computer-use-preview-10-2025";
 const API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_MODEL_SELECTION_RETRIES = 1;
+const MODEL_REQUEST_TIMEOUT_MS = Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 12000);
+const MAX_GEMINI_HTTP_ATTEMPTS = Number(process.env.GEMINI_HTTP_ATTEMPTS || 1);
 const STALE_COORDINATE_RADIUS = 28;
 const MAX_STALE_COORDINATE_RECOVERIES = 2;
 const MIN_STEPS_BEFORE_FINISH = 6;
@@ -88,16 +90,43 @@ export async function chooseNextAction(session, observation) {
   let requestBody = primaryRequest;
   let response;
   let responseText = "";
+  const requestStartedAt = Date.now();
+  session.lastGeminiDebug = {
+    request: redactRequestForLogs(requestBody),
+    responseStatus: null,
+    responseBody: null,
+    retryUsed: false,
+    requestStartedAt: new Date(requestStartedAt).toISOString(),
+    requestTimeoutMs: MODEL_REQUEST_TIMEOUT_MS
+  };
   try {
     response = await fetchGeminiWithRetry(requestBody, geminiApiKey);
     responseText = await response.text();
   } catch (error) {
+    const requestDurationMs = Date.now() - requestStartedAt;
+    session.lastGeminiDebug = {
+      ...session.lastGeminiDebug,
+      requestDurationMs,
+      requestError: error.message || "unknown transport failure",
+      requestTimedOut: error.name === "AbortError" || /timed out/i.test(error.message || "")
+    };
     session.transientErrorCount = (session.transientErrorCount || 0) + 1;
+    if (error.name === "AbortError" || /timed out/i.test(error.message || "")) {
+      return {
+        actionType: ACTION_TYPES.WAIT,
+        rationale: `Gemini request timed out after ${requestDurationMs}ms; retrying with a fresh step.`,
+        waitMs: 800,
+        skipPersistenceAccounting: true,
+        recoveryKind: "transport_timeout"
+      };
+    }
     if (session.transientErrorCount <= 2) {
       return {
         actionType: ACTION_TYPES.WAIT,
         rationale: "Gemini network error; waiting briefly before retrying.",
-        waitMs: 1500
+        waitMs: 800,
+        skipPersistenceAccounting: true,
+        recoveryKind: "transport_error"
       };
     }
     return {
@@ -107,10 +136,11 @@ export async function chooseNextAction(session, observation) {
   }
 
   session.lastGeminiDebug = {
-    request: redactRequestForLogs(requestBody),
+    ...session.lastGeminiDebug,
     responseStatus: response.status,
     responseBody: truncateText(responseText, 5000),
-    retryUsed: false
+    retryUsed: false,
+    requestDurationMs: Date.now() - requestStartedAt
   };
 
   if (!response.ok) {
@@ -131,7 +161,9 @@ export async function chooseNextAction(session, observation) {
         return {
           actionType: ACTION_TYPES.WAIT,
           rationale: `Gemini returned transient ${response.status}; waiting briefly before retrying.`,
-          waitMs: 1500
+          waitMs: 800,
+          skipPersistenceAccounting: true,
+          recoveryKind: "transport_status"
         };
       }
     }
@@ -344,20 +376,26 @@ function buildRequestBody(session, observation, options = {}) {
 }
 
 async function fetchGemini(requestBody, geminiApiKey) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error(`Gemini request timed out after ${MODEL_REQUEST_TIMEOUT_MS}ms.`)), MODEL_REQUEST_TIMEOUT_MS);
   return fetch(`${API_ROOT}/${DEFAULT_MODEL}:generateContent`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-goog-api-key": geminiApiKey
     },
-    body: JSON.stringify(requestBody)
+    body: JSON.stringify(requestBody),
+    signal: controller.signal
+  }).finally(() => {
+    clearTimeout(timeout);
   });
 }
 
 async function fetchGeminiWithRetry(requestBody, geminiApiKey) {
-  const maxAttempts = 3;
+  const maxAttempts = Math.max(1, MAX_GEMINI_HTTP_ATTEMPTS);
   let attempt = 0;
   let lastResponse = null;
+  let lastError = null;
 
   while (attempt < maxAttempts) {
     attempt += 1;
@@ -367,15 +405,19 @@ async function fetchGeminiWithRetry(requestBody, geminiApiKey) {
         return response;
       }
       lastResponse = response;
-    } catch {
+    } catch (error) {
+      lastError = error;
       if (attempt >= maxAttempts) {
-        throw new Error("Gemini request failed after retries.");
+        throw error;
       }
     }
 
     await delay(250 * attempt);
   }
 
+  if (lastError) {
+    throw lastError;
+  }
   return lastResponse;
 }
 
